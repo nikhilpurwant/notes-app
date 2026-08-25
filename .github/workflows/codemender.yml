@@ -1,0 +1,61 @@
+name: CodeMender Security Scan
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  security-scan:
+    name: CodeMender Vulnerability Scan
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: 1. Install CodeMender CLI
+        run: |
+          curl -L -o cm-linux-amd64.zip "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+          unzip -q cm-linux-amd64.zip
+          chmod +x cm
+          sudo mv cm /usr/local/bin/cm
+          cm --help | head -n 10
+
+      - name: 2. Initialize & Run CodeMender Scan
+        run: |
+          cm init
+          cm find -y
+
+      - name: 3. Export Findings to JSON
+        run: |
+          cm report -f json > /tmp/findings.json
+
+      - name: 4. Check Findings & Fail if Vulnerabilities Detected
+        run: |
+          FINDINGS_LINES=$(cat /tmp/findings.json | wc -l)
+          echo "Total lines in /tmp/findings.json: $FINDINGS_LINES"
+          
+          if [ "$FINDINGS_LINES" -gt 1 ]; then
+            echo "❌ Build Failed: CodeMender detected security vulnerabilities!"
+            echo "---------------------------------------------------------"
+            cat /tmp/findings.json
+            echo "---------------------------------------------------------"
+            exit 1
+          fi
+          
+          echo "✅ Build Passed: 0 security vulnerabilities detected."

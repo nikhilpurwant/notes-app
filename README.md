@@ -65,3 +65,183 @@ The database initializes with the following demo credentials:
      ```
   2. **Result**: Every time a user loads the home page, the JavaScript payload executes within their browser context.
 
+---
+
+## CI/CD Security Automation & Workload Identity Federation
+
+<details>
+<summary>🔑 <b>Google Cloud Workload Identity Federation (WIF) Setup for GitHub Actions</b></summary>
+
+<br>
+
+Follow these copy-pasteable commands in Google Cloud Shell or terminal to set up keyless Workload Identity Federation for GitHub Actions and grant the necessary permissions for CodeMender:
+
+> [!IMPORTANT]
+> **Prerequisites & Permissions:**
+> - The account executing these setup commands must have the **Workload Identity Pool Admin** role (`roles/iam.workloadIdentityPoolAdmin`) or **Project Owner** (`roles/owner`) on the target Google Cloud project.
+> - If this role was granted recently, allow **1–2 minutes** for Google Cloud IAM propagation across STS/IAM endpoints before creating the pool.
+
+```bash
+# -------------------------------------------------------------
+# Configuration Variables (CUSTOMIZE THESE)
+# -------------------------------------------------------------
+export PROJECT_ID="your-gcp-project-id"
+export SA_NAME="codemender-ci-sa"
+export WORKLOAD_POOL="github-pool"
+export WORKLOAD_PROVIDER="github-provider"
+export GITHUB_REPO="your-github-username/notes-app" # e.g. "acme/notes-app"
+
+# -------------------------------------------------------------
+# 1. Set Active Project & Enable APIs
+# -------------------------------------------------------------
+gcloud config set project $PROJECT_ID
+gcloud services enable \
+    aiplatform.googleapis.com \
+    iamcredentials.googleapis.com \
+    iam.googleapis.com
+
+# -------------------------------------------------------------
+# 2. Create Service Account for GitHub Actions CI/CD
+# -------------------------------------------------------------
+gcloud iam service-accounts create $SA_NAME \
+    --display-name="CodeMender CI/CD Service Account"
+
+# -------------------------------------------------------------
+# 3. Grant Vertex AI User Role (Required for CodeMender)
+# -------------------------------------------------------------
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --role="roles/aiplatform.user"
+
+# -------------------------------------------------------------
+# 4. Create Workload Identity Pool & OIDC Provider
+# -------------------------------------------------------------
+gcloud iam workload-identity-pools create $WORKLOAD_POOL \
+    --location="global" \
+    --display-name="GitHub Actions Pool"
+
+gcloud iam workload-identity-pools providers create-oidc $WORKLOAD_PROVIDER \
+    --location="global" \
+    --workload-identity-pool=$WORKLOAD_POOL \
+    --display-name="GitHub Provider" \
+    --issuer-uri="https://token.actions.githubusercontent.com" \
+    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
+    --attribute-condition="assertion.repository == '${GITHUB_REPO}'"
+
+# -------------------------------------------------------------
+# 5. Bind Service Account to GitHub Repository (Impersonation)
+# -------------------------------------------------------------
+export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+
+gcloud iam service-accounts add-iam-policy-binding \
+    "${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --role="roles/iam.workloadIdentityUser" \
+    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WORKLOAD_POOL}/attribute.repository/${GITHUB_REPO}"
+
+# -------------------------------------------------------------
+# 6. Output Required GitHub Repository Secrets
+# -------------------------------------------------------------
+echo "========================================================================="
+echo "Copy the following key-value pairs into GitHub Repo -> Settings -> Secrets -> Actions:"
+echo "========================================================================="
+echo "GCP_PROJECT_ID:"
+echo "${PROJECT_ID}"
+echo ""
+echo "GCP_SERVICE_ACCOUNT:"
+echo "${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+echo ""
+echo "GCP_WORKLOAD_IDENTITY_PROVIDER:"
+echo "projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WORKLOAD_POOL}/providers/${WORKLOAD_PROVIDER}"
+echo "========================================================================="
+```
+
+### How Workload Identity Federation Works Under the Hood
+1. **GitHub OIDC Token**: GitHub Actions requests a signed OIDC JWT token containing repository claims (`repository`, `actor`, `ref`).
+2. **Keyless Exchange**: The `google-github-actions/auth` step exchanges this JWT with the GCP Security Token Service (STS).
+3. **Impersonation**: GCP verifies that the token's `assertion.repository` matches the bound repository policy and generates a short-lived (1 hour max) OAuth 2.0 access token for `${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com`.
+4. **No Static Keys**: Zero long-lived service account JSON keys to create, rotate, or leak.
+
+</details>
+
+<br>
+
+<details>
+<summary>🛡️ <b>GitHub Actions Workflow: CodeMender Security Gate (`.github/workflows/codemender.yml`)</b></summary>
+
+<br>
+
+This repository includes an automated security workflow located at [`.github/workflows/codemender.yml`](file:///.github/workflows/codemender.yml) that executes on every push and pull request:
+
+```yaml
+name: CodeMender Security Scan
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  security-scan:
+    name: CodeMender Vulnerability Scan
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: 1. Install CodeMender CLI
+        run: |
+          curl -L -o cm-linux-amd64.zip "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+          unzip -q cm-linux-amd64.zip
+          chmod +x cm
+          sudo mv cm /usr/local/bin/cm
+          cm --help | head -n 10
+
+      - name: 2. Initialize & Run CodeMender Scan
+        run: |
+          cm init
+          cm find -y
+
+      - name: 3. Export Findings to JSON
+        run: |
+          cm report -f json > /tmp/findings.json
+
+      - name: 4. Check Findings & Fail if Vulnerabilities Detected
+        run: |
+          FINDINGS_LINES=$(cat /tmp/findings.json | wc -l)
+          echo "Total lines in /tmp/findings.json: $FINDINGS_LINES"
+          
+          if [ "$FINDINGS_LINES" -gt 1 ]; then
+            echo "❌ Build Failed: CodeMender detected security vulnerabilities!"
+            echo "---------------------------------------------------------"
+            cat /tmp/findings.json
+            echo "---------------------------------------------------------"
+            exit 1
+          fi
+          
+          echo "✅ Build Passed: 0 security vulnerabilities detected."
+```
+
+### Workflow Steps Breakdown
+1. **Install CodeMender**: Downloads and installs the CodeMender CLI binary for Linux AMD64 from Google Cloud Artifact Registry (as specified in the [CodeMender setup docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender/set-up-environment)).
+2. **Initialize & Scan**: Executes `cm init` to configure the workspace and `cm find -y` to scan repository code for security vulnerabilities.
+3. **Export Findings**: Runs `cm report -f json > /tmp/findings.json` to dump all discovered vulnerabilities into a JSON report.
+4. **Security Quality Gate**: Uses `cat /tmp/findings.json | wc -l` to check the findings report size. When vulnerabilities are detected, the output contains a JSON list spanning multiple lines (e.g. 100+ lines); if line count $> 1$, the step prints the findings and fails the build (`exit 1`).
+
+</details>
+
+

@@ -11,3 +11,4 @@ wheels/
 vulnerable_lab.db
 
 uv.lock
+.cm_project
