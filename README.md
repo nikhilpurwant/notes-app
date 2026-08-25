@@ -200,6 +200,13 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
+      - name: Protect GCP Credentials from git clean
+        run: |
+          # Move the file to the runner's temp directory
+          mv $GOOGLE_APPLICATION_CREDENTIALS $RUNNER_TEMP/gcp-creds.json
+          # Update the environment variable to point to the new location
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp-creds.json" >> $GITHUB_ENV
+
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
