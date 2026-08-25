@@ -221,7 +221,7 @@ jobs:
       - name: 2. Initialize & Run CodeMender Scan
         run: |
           cm init
-          cm find . -y
+          cm find . -y --unrestricted
 
       - name: 3. Export Findings to JSON
         run: |
