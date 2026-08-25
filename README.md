@@ -265,3 +265,23 @@ Traditionally, connecting GitHub Actions to Google Cloud required storing a long
 When the GitHub auth action successfully authenticates, it generates the temporary Application Default Credentials (ADC) file and places it directly in the root of your Git workspace. Because CodeMender runs a strict `git clean -fd` to guarantee a pristine environment before running vulnerability tests, it immediately deletes that untracked credential file, causing the cloud connection to fail. Moving it to `RUNNER_TEMP` relocates the file safely outside the Git repository boundaries—protecting it from the wipe while keeping it accessible via the `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
 
 </details>
+
+<br>
+
+<details>
+<summary>📸 <b>Sample Run: What does a blocked PR / build failure look like?</b></summary>
+
+<br>
+
+When a pull request or commit contains unaddressed security vulnerabilities, CodeMender identifies them during the scan step, exports the findings, and triggers the quality gate failure to block the build:
+
+![CodeMender Security Gate Build Failure](./workflow_run.png)
+
+### Failure Flow:
+1. **Automated Discovery**: `cm find . -y --unrestricted` detects vulnerabilities across the codebase (e.g. SQL Injection, IDOR, Stored XSS).
+2. **Report Generation**: `cm report -f json > /tmp/findings.json` outputs the finding list.
+3. **Gate Triggered**: Because `/tmp/findings.json` contains vulnerability records (line count $> 1$), the pipeline dumps the findings to the job logs and exits with code `1` (`exit 1`).
+4. **Merge Blocked**: The GitHub Actions check fails with ❌, preventing vulnerable code from merging into protected branches.
+
+</details>
+
