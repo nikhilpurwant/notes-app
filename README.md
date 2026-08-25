@@ -245,10 +245,23 @@ jobs:
 
 ### Workflow Steps Breakdown
 1. **Install CodeMender**: Downloads and installs the CodeMender CLI binary for Linux AMD64 from Google Cloud Artifact Registry (as specified in the [CodeMender setup docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender/set-up-environment)).
-2. **Initialize & Scan**: Executes `cm init` to configure the workspace and `cm find -y` to scan repository code for security vulnerabilities.
+2. **Initialize & Scan**: Executes `cm init` to configure the workspace and `cm find . -y --unrestricted` to scan repository code for security vulnerabilities.
 3. **Export Findings**: Runs `cm report -f json > /tmp/findings.json` to dump all discovered vulnerabilities into a JSON report.
 4. **Security Quality Gate**: Uses `cat /tmp/findings.json | wc -l` to check the findings report size. When vulnerabilities are detected, the output contains a JSON list spanning multiple lines (e.g. 100+ lines); if line count $> 1$, the step prints the findings and fails the build (`exit 1`).
 
 </details>
 
+<br>
 
+<details>
+<summary>💡 <b>Key Architecture Insights: What should I know about this setup?</b></summary>
+
+<br>
+
+**Workload Identity Federation (Keyless Authentication)**
+Traditionally, connecting GitHub Actions to Google Cloud required storing a long-lived Service Account JSON key as a GitHub Secret, creating a permanent security liability if leaked. Workload Identity Federation establishes a trust relationship via OIDC (OpenID Connect). Instead of using a static key, GitHub requests a short-lived, temporary token just for the duration of the workflow job. This means zero persistent keys to rotate, leak, or manage, making it the industry standard for CI/CD security.
+
+**Protecting the Credentials File (`RUNNER_TEMP`)**
+When the GitHub auth action successfully authenticates, it generates the temporary Application Default Credentials (ADC) file and places it directly in the root of your Git workspace. Because CodeMender runs a strict `git clean -fd` to guarantee a pristine environment before running vulnerability tests, it immediately deletes that untracked credential file, causing the cloud connection to fail. Moving it to `RUNNER_TEMP` relocates the file safely outside the Git repository boundaries—protecting it from the wipe while keeping it accessible via the `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+
+</details>
